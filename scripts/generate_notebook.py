@@ -1,0 +1,211 @@
+import json
+import os
+
+notebook_dict = {
+    "cells": [
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "# 🌲 Modelado de Regresión y Analítica de Datos: Optimización del Proceso de Blanqueo de Celulosa\n",
+                "\n",
+                "## 🏭 Contexto Industrial & Planteamiento del Problema\n",
+                "La industria de celulosa en Chile opera sistemas avanzados de control para el blanqueo químico de pulpa Kraft en secuencias multietapa:\n",
+                "$$\\text{Pre-Blanqueo} \\longrightarrow \\text{D}_0 \\longrightarrow \\text{EOP} \\longrightarrow \\text{D}_1 \\longrightarrow \\text{D}_2$$\n",
+                "\n",
+                "- **Objetivo General**: Identificar las variables explicativas clave y construir el mejor modelo de regresión lineal para pronosticar y controlar el **Consumo Específico de Dióxido de Cloro ($ClO_2$)** en kg/ADt.\n",
+                "- **Límite Operacional de Diseño**: $17.50\\text{ kg/ADt}$.\n",
+                "- **Consumo Promedio Histórico**: $19.10\\text{ kg/ADt}$ (con picos hasta $20.37\\text{ kg/ADt}$).\n",
+                "- **Impacto Económico**: \n",
+                "  - Sobreconsumo evitable: **USD $1,600,000 / año**.\n",
+                "  - Beneficio potencial por optimización del 30%: **USD $500,000 / año**.\n",
+                "\n",
+                "---\n",
+                "### ⚙️ Metodología y Objetivos Específicos\n",
+                "1. **Comprensión del Problema**: Formalización matemática, mapa de procesos y evaluación económica.\n",
+                "2. **Entendimiento de los Datos**: Clasificación de 100 sensores por dominio operativo y análisis exploratorio (EDA).\n",
+                "3. **Preparación de Datos**: Detección de varianza cero, prevención rigurosa de fuga de datos (*data leakage*), partición 80/20 (`random_state=2022`) y estandarización `StandardScaler`.\n",
+                "4. **Modelado y Diagnóstico**:\n",
+                "   - Regresión Lineal Clásica (MCO/OLS) + Diagnósticos Econométricos (Jarque-Bera, Durbin-Watson, Breusch-Pagan, Multicolinealidad).\n",
+                "   - Regresión Stepwise (optimizando Criterio de Información de Akaike - AIC).\n",
+                "   - Regresión Ridge ($L_2$) con $\\lambda$ óptimo por validación cruzada.\n",
+                "   - Regresión Lasso ($L_1$) con $\\lambda$ óptimo y selección esparsa.\n",
+                "   - Regresión Elastic Net ($L_1+L_2$) con $\\lambda$ y $\\alpha$ (l1-ratio) óptimos.\n",
+                "5. **Evaluación Comparativa & Selección del Modelo Óptimo**.\n"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "import sys\n",
+                "from pathlib import Path\n",
+                "\n",
+                "# Configurar path raíz del proyecto\n",
+                "ROOT_PATH = Path.cwd().parent if Path.cwd().name == 'notebooks' else Path.cwd()\n",
+                "sys.path.insert(0, str(ROOT_PATH))\n",
+                "\n",
+                "import pandas as pd\n",
+                "import numpy as np\n",
+                "import matplotlib.pyplot as plt\n",
+                "import seaborn as sns\n",
+                "\n",
+                "from src.config import CONFIG\n",
+                "from src.data.data_loader import IndustrialDataLoader\n",
+                "from src.data.data_preprocessor import IndustrialDataPreprocessor\n",
+                "from src.features.feature_engineering import DomainFeatureClassifier\n",
+                "from src.models.model_factory import ModelFactory\n",
+                "from src.models.model_evaluator import ModelEvaluator\n",
+                "from src.models.ols_regression import OLSRegressionModel\n",
+                "from src.models.stepwise_regression import StepwiseAICRegressionModel\n",
+                "from src.models.regularized_models import (\n",
+                "    RidgeRegressionModel,\n",
+                "    LassoRegressionModel,\n",
+                "    ElasticNetRegressionModel\n",
+                ")\n",
+                "from src.visualization.plotters import IndustrialVisualizer\n",
+                "\n",
+                "print(f'[*] Configuración cargada con éxito. Semilla: {CONFIG.RANDOM_SEED}, Target: {CONFIG.PRIMARY_TARGET_VARIABLE}')\n"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "## 📥 1 & 2. Ingestión y Entendimiento de Datos\n",
+                "Cargamos la serie temporal del proceso de blanqueo a intervalos de 2 minutos (20,126 observaciones y 100 sensores industriales).\n"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "loader = IndustrialDataLoader(config=CONFIG)\n",
+                "raw_df, tag_meta, unit_meta = loader.load_raw_data(use_cache=True)\n",
+                "print(f'Dimensiones del dataset de planta: {raw_df.shape}')\n",
+                "raw_df.head(5)\n"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 🏷️ Clasificación de Variables por Dominio Operacional\n",
+                "Mapeo de los 100 sensores a las 5 categorías requeridas por el enunciado:\n"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "feature_class_df = DomainFeatureClassifier.classify_features(list(raw_df.columns), metadata_tags=tag_meta)\n",
+                "print(feature_class_df['Categoria'].value_counts())\n",
+                "feature_class_df.head(20)\n"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "## 🧹 3. Preparación de Datos y Prevención de Fuga (*Data Leakage*)\n",
+                "- Exclusión de sensores sin variación o inhabilitados.\n",
+                "- Aislamiento estricto de componentes aritméticos del consumo de $ClO_2$.\n",
+                "- Partición 80% Train / 20% Test con semilla `SEED = 2022`.\n",
+                "- Estandarización `StandardScaler` ajustada únicamente con `X_train`.\n"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "preprocessor = IndustrialDataPreprocessor(config=CONFIG)\n",
+                "prep_data = preprocessor.clean_and_prepare(raw_df, target_variable=CONFIG.PRIMARY_TARGET_VARIABLE)\n",
+                "print(f'Conjunto de Entrenamiento: {prep_data.X_train_scaled.shape}')\n",
+                "print(f'Conjunto de Prueba:        {prep_data.X_test_scaled.shape}')\n"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "## 🔬 4. Modelado y Diagnósticos Estadísticos\n",
+                "Ajuste y validación de los 5 enfoques de regresión lineal:\n"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "evaluator = ModelEvaluator(config=CONFIG)\n",
+                "\n",
+                "# 4.1 OLS (MCO) con Diagnósticos\n",
+                "ols_model = OLSRegressionModel()\n",
+                "ols_model.fit(prep_data.X_train_scaled, prep_data.y_train)\n",
+                "evaluator.add_evaluation(ols_model.evaluate(prep_data.X_train_scaled, prep_data.y_train, prep_data.X_test_scaled, prep_data.y_test))\n",
+                "\n",
+                "# 4.2 Stepwise AIC\n",
+                "stepwise_model = StepwiseAICRegressionModel(max_features=25, direction='both', verbose=False)\n",
+                "stepwise_model.fit(prep_data.X_train_scaled, prep_data.y_train)\n",
+                "evaluator.add_evaluation(stepwise_model.evaluate(prep_data.X_train_scaled, prep_data.y_train, prep_data.X_test_scaled, prep_data.y_test))\n",
+                "\n",
+                "# 4.3 Ridge (L2 con CV)\n",
+                "ridge_model = RidgeRegressionModel(cv=CONFIG.CV_FOLDS)\n",
+                "ridge_model.fit(prep_data.X_train_scaled, prep_data.y_train)\n",
+                "evaluator.add_evaluation(ridge_model.evaluate(prep_data.X_train_scaled, prep_data.y_train, prep_data.X_test_scaled, prep_data.y_test))\n",
+                "\n",
+                "# 4.4 Lasso (L1 con CV)\n",
+                "lasso_model = LassoRegressionModel(cv=CONFIG.CV_FOLDS, random_state=CONFIG.RANDOM_SEED)\n",
+                "lasso_model.fit(prep_data.X_train_scaled, prep_data.y_train)\n",
+                "evaluator.add_evaluation(lasso_model.evaluate(prep_data.X_train_scaled, prep_data.y_train, prep_data.X_test_scaled, prep_data.y_test))\n",
+                "\n",
+                "# 4.5 Elastic Net (L1+L2 con CV)\n",
+                "enet_model = ElasticNetRegressionModel(cv=CONFIG.CV_FOLDS, random_state=CONFIG.RANDOM_SEED)\n",
+                "enet_model.fit(prep_data.X_train_scaled, prep_data.y_train)\n",
+                "evaluator.add_evaluation(enet_model.evaluate(prep_data.X_train_scaled, prep_data.y_train, prep_data.X_test_scaled, prep_data.y_test))\n",
+                "\n",
+                "print('[+] Todos los modelos han sido entrenados y evaluados.')\n"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "## 📊 5. Tabla Comparativa de Modelos y Selección Final\n"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "comp_df = evaluator.generate_comparison_dataframe()\n",
+                "evaluator.print_comparison_table()\n",
+                "best_model_metrics = evaluator.select_best_model()\n"
+            ]
+        }
+    ],
+    "metadata": {
+        "language_info": {
+            "name": "python",
+            "version": "3.13"
+        }
+    },
+    "nbformat": 4,
+    "nbformat_minor": 5
+}
+
+os.makedirs("notebooks", exist_ok=True)
+with open("notebooks/exploratory_and_modeling.ipynb", "w", encoding="utf-8") as f:
+    json.dump(notebook_dict, f, indent=2, ensure_ascii=False)
+print("Generated notebooks/exploratory_and_modeling.ipynb successfully.")
